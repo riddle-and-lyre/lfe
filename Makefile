@@ -59,9 +59,9 @@ $(EBINDIR)/%.beam: $(SRCDIR)/%.erl
 %.erl: %.yrl
 	$(ERLC) -o $(SRCDIR) $<
 
-all: compile docs
+all: compile stdlib docs
 
-.PHONY: compile erlc_compile install docs clean
+.PHONY: compile erlc_compile stdlib install docs clean
 
 ## Compile using rebar if it exists else using make
 compile: maps.mk
@@ -74,6 +74,10 @@ compile: maps.mk
 
 ## Compile using erlc
 erlc_compile: $(addprefix $(EBINDIR)/, $(EBINS)) $(addprefix $(BINDIR)/, $(BINS))
+
+stdlib:
+	@echo "Building the LFE stdlib ..."
+	@$(MAKE) $(MFLAGS) -C $@
 
 maps.mk:
 	erl -eval $(MAPS_MK)

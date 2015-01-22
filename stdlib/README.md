@@ -1,0 +1,3 @@
+# The LFE Standard Library
+
+For now, this is just an experiment ...

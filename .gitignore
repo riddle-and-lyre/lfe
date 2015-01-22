@@ -7,3 +7,5 @@ src/lfe_scan.erl
 erl_crash.dump
 *.elc
 *.o
+*.sw[po]
+.rebar/*

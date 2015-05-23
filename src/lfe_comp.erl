@@ -53,9 +53,37 @@
 
 -define(DEFAULT_OPTS, [verbose,report]).
 
-file(Name) -> do_file(Name, ?DEFAULT_OPTS).
+file(Name) -> file(Name, ?DEFAULT_OPTS).
 
-file(Name, Opts) -> do_file(Name, Opts).
+file(Name, Opts) -> do_compile({file,Name}, Opts).
+
+%% forms(Forms) -> {ok,Mod,Bin,Warnings} | {error,Errors,Warnings}.
+%% forms(Forms, Options) -> {ok,Mod,Bin,Warnings} | {error,Errors,Warnings}.
+%%  Compile the LFE forms Forms, always return a binary.
+
+forms(Forms) -> forms(Forms, ?DEFAULT_OPTS).
+
+forms(Forms, Opts) -> do_compile({forms,Forms}, Opts).
+
+do_compile(Input, Opts) ->
+    Ifun = fun () ->
+		   Ret = try
+			     internal(Input, Opts)
+			 catch
+			     error:Reason ->
+				 {error,Reason}
+			 end,
+		   exit(Ret)
+	   end,
+    {Pid,Ref} = spawn_monitor(Ifun),
+    receive
+	{'DOWN',Ref,_,Pid,Res} -> Res
+    end.
+
+%% internal(Input, Options) -> Result.
+
+internal({file,Name}, Opts) -> do_file(Name, Opts);
+internal({forms,Forms}, Opts) -> do_forms(Forms, Opts).
 
 do_file(Name, Opts0) ->
     Opts1 = lfe_comp_opts(Opts0),
@@ -68,14 +96,6 @@ do_file(Name, Opts0) ->
             do_forms(St2#comp{code=Fs});
         {error,Error} -> do_error_return(St2#comp{errors=[Error]})
     end.
-
-%% forms(Forms) -> {ok,Mod,Bin,Warnings} | {error,Errors,Warnings}.
-%% forms(Forms, Options) -> {ok,Mod,Bin,Warnings} | {error,Errors,Warnings}.
-%%  Compile the LFE forms Forms, always return a binary.
-
-forms(Forms) -> do_forms(Forms, ?DEFAULT_OPTS).
-
-forms(Forms, Opts) -> do_forms(Forms, Opts).
 
 do_forms(Fs0, Opts0) ->
     Opts1 = lfe_comp_opts(Opts0),
@@ -114,11 +134,11 @@ outdir([]) -> ".".
 %%  Set the include path, we permit {i,Dir} and [i,Dir].
 
 include_path(#comp{ldir=Dir,opts=Opts}=St) ->
-    Ifun = fun ({i,I}, Is) -> [I|Is];
-               ([i,I], Is) -> [I|Is];
+    Ifun = fun ({i,I}, Is) -> [I|Is];		%Erlang wat
+               ([i,I], Is) -> [I|Is];		%LFE way
                (_, Is) -> Is
            end,
-    %% Same ordering as in the erlang compiler
+    %% Same ordering as in the erlang compiler.
     Is = [".",Dir|foldr(Ifun, [], Opts)],       %Default entries
     St#comp{ipath=Is}.
 
@@ -177,7 +197,7 @@ do_lfe_codegen(#comp{cinfo=Ci,code=Fs0}=St) ->
     {ok,St#comp{code=Core,mod=Mod}}.
 
 do_erl_comp(St) ->
-    ErlOpts = erl_comp_opts(St),        %Options to erlang compiler
+    ErlOpts = erl_comp_opts(St),                %Options to erlang compiler
     Es = St#comp.errors,
     Ws = St#comp.warnings,
     case compile:forms(St#comp.code, ErlOpts) of
@@ -195,24 +215,24 @@ do_erl_comp(St) ->
 
 erl_comp_opts(St) ->
     Os0 = St#comp.opts,
-    Filter = fun (report) -> false;         %No reporting!
-         (report_warnings) -> false;
-         (report_errors) -> false;
-         ('S') -> false;                    %No stopping early
-         ('E') -> false;
-         ('P') -> false;
-         (dcore) -> false;
-         (to_core0) -> false;
-         (warnings_as_errors) -> false;     %We handle this ourselves
-         (_) -> true                        %Everything else
-         end,
+    Filter = fun (report) -> false;             %No reporting!
+                 (report_warnings) -> false;
+                 (report_errors) -> false;
+                 ('S') -> false;                %No stopping early
+                 ('E') -> false;
+                 ('P') -> false;
+                 (dcore) -> false;
+                 (to_core0) -> false;
+                 (warnings_as_errors) -> false; %We handle this ourselves
+                 (_) -> true                    %Everything else
+             end,
     Os1 = filter(Filter, Os0),
     %% Now build options for the erlang compiler. 'no_bopt' turns off
     %% an optimisation in the guard which crashes our code.
-    [from_core,                         %We are compiling from core
-     {source,St#comp.lfile},            %Set the source file
-     return,                            %Ensure we return something
-     binary,                            %We want a binary
+    [from_core,                                 %We are compiling from core
+     {source,St#comp.lfile},                    %Set the source file
+     return,                                    %Ensure we return something
+     binary,                                    %We want a binary
      no_bopt|Os1].
 
 %% passes() -> [Pass].
@@ -270,17 +290,17 @@ do_passes([{done,Fun,Ext}|_], St) ->
         true -> {ok,St#comp{ret=[St#comp.code]}};
         false -> do_save_file(Fun, Ext, St#comp{ret=[]})
     end;
-do_passes([], St) -> {ok,St}.            %Got to the end, everything ok!
+do_passes([], St) -> {ok,St}.                   %Got to the end, everything ok!
 
 do_save_file(Fun, Ext, St) ->
     Name = filename:join(St#comp.odir, St#comp.base ++ ["."|Ext]),
     %% delayed_write useful here but plays havoc with erjang.
     case file:open(Name, [write]) of
-    {ok,File} ->
-        Fun(File, St#comp.code),
-        ok = file:close(File),
-        {ok,St};
-    {error,E} -> {error,St#comp{errors=[{file,E}]}}
+        {ok,File} ->
+            Fun(File, St#comp.code),
+            ok = file:close(File),
+            {ok,St};
+        {error,E} -> {error,St#comp{errors=[{file,E}]}}
     end.
 
 %% sexpr_pp(File, Sexprs) -> ok.
@@ -313,15 +333,15 @@ werror(#comp{opts=Opts,warnings=Ws}) ->
 
 do_ok_return(#comp{lfile=Lfile,opts=Opts,ret=Ret0,warnings=Ws}=St) ->
     case werror(St) of
-    true -> do_error_return(St);        %Warnings are errors!
-    false ->
-        when_opt(report, Opts, fun () -> list_warnings(Lfile, Ws) end),
-        %% Fix right return.
-        Ret1 = case member(return, Opts) of
-               true -> Ret0 ++ [return_errors(Lfile, Ws)];
-               false -> Ret0
-           end,
-        list_to_tuple([ok,St#comp.mod|Ret1])
+        true -> do_error_return(St);            %Warnings are errors!
+        false ->
+            when_opt(report, Opts, fun () -> list_warnings(Lfile, Ws) end),
+            %% Fix right return.
+            Ret1 = case member(return, Opts) of
+                       true -> Ret0 ++ [return_errors(Lfile, Ws)];
+                       false -> Ret0
+                   end,
+            list_to_tuple([ok,St#comp.mod|Ret1])
     end.
 
 do_error_return(#comp{lfile=Lfile,opts=Opts,errors=Es,warnings=Ws}) ->
@@ -329,8 +349,8 @@ do_error_return(#comp{lfile=Lfile,opts=Opts,errors=Es,warnings=Ws}) ->
     when_opt(report, Opts, fun () -> list_warnings(Lfile, Ws) end),
     %% Fix right return.
     case member(return, Opts) of
-    true -> {error,return_errors(Lfile, Es),return_errors(Lfile, Ws)};
-    false -> error
+        true -> {error,return_errors(Lfile, Es),return_errors(Lfile, Ws)};
+        false -> error
     end.
 
 return_errors(_, []) -> [];
@@ -338,25 +358,25 @@ return_errors(Lfile, Es) -> [{Lfile,Es}].
 
 list_warnings(F, Ws) ->
     foreach(fun ({Line,Mod,Warn}) ->
-            Cs = Mod:format_error(Warn),
-            lfe_io:format("~s:~w: Warning: ~s\n", [F,Line,Cs]);
-        ({Mod,Warn}) ->
-            Cs = Mod:format_error(Warn),
-            lfe_io:format("~s: Warning: ~s\n", [F,Cs])
-        end, Ws).
+                    Cs = Mod:format_error(Warn),
+                    lfe_io:format("~s:~w: Warning: ~s\n", [F,Line,Cs]);
+                ({Mod,Warn}) ->
+                    Cs = Mod:format_error(Warn),
+                    lfe_io:format("~s: Warning: ~s\n", [F,Cs])
+            end, Ws).
 
 list_errors(F, Es) ->
     foreach(fun ({Line,Mod,Error}) ->
-            Cs = Mod:format_error(Error),
-            lfe_io:format("~s:~w: ~s\n", [F,Line,Cs]);
-        ({Mod,Error}) ->
-            Cs = Mod:format_error(Error),
-            lfe_io:format("~s: ~s\n", [F,Cs])
-        end, Es).
+                    Cs = Mod:format_error(Error),
+                    lfe_io:format("~s:~w: ~s\n", [F,Line,Cs]);
+                ({Mod,Error}) ->
+                    Cs = Mod:format_error(Error),
+                    lfe_io:format("~s: ~s\n", [F,Cs])
+            end, Es).
 
 debug_print(Format, Args, St) ->
     when_opt(debug_print, St#comp.opts,
-        fun () -> lfe_io:format(Format, Args) end).
+             fun () -> lfe_io:format(Format, Args) end).
 
 %% when_opt(Option, Options, Fun) -> ok.
 %% unless_opt(Option, Options, Fun) -> ok.
@@ -364,8 +384,8 @@ debug_print(Format, Args, St) ->
 
 when_opt(Opt, Opts, Fun) ->
     case member(Opt, Opts) of
-    true -> Fun();
-    false -> ok
+        true -> Fun();
+        false -> ok
     end.
 
 %% unless_opt(Opt, Opts, Fun) ->

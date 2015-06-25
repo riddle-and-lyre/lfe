@@ -990,6 +990,59 @@ comp_gif(Te, Tr, Fa, Env, L, St0) ->
 %%      end,
 %%     simple_seq([Cte], If, Env, L, St3).
 
+%% comp_lit(Value) -> LitExpr.
+%%  Make a literal expression from an Erlang value. Try to make it as
+%%  literal as possible. This function will fail if the value is not
+%%  expressable as a literal (for instance, a pid).
+
+comp_lit([H|T]) ->
+    Ch = comp_lit(H),
+    Ct = comp_lit(T),
+    %% c_cons is smart and can handle head and tail both literals.
+    c_cons(Ch, Ct);
+comp_lit([]) -> c_nil();
+comp_lit(T) when is_tuple(T) ->
+    Es = comp_lit_list(tuple_to_list(T)),
+    %% c_tuple is smart and can handle a list of literals.
+    c_tuple(Es);
+comp_lit(A) when is_atom(A) -> c_atom(A);
+comp_lit(I) when is_integer(I) -> c_int(I);
+comp_lit(F) when is_float(F) -> c_float(F);
+comp_lit(Bin) when is_bitstring(Bin) ->
+    Bits = comp_lit_bitsegs(Bin),
+    ann_c_binary([], Bits);
+comp_lit(Map) when ?IS_MAP(Map) ->
+    comp_lit_map(Map).
+
+comp_lit_list(Vals) -> [ comp_lit(V) || V <- Vals ].
+
+is_lit_list(Es) -> all(fun (E) -> is_literal(E) end, Es).
+
+comp_lit_bitsegs(<<B:8,Bits/bitstring>>) ->         %Next byte
+    [c_byte_bitseg(B, 8)|comp_lit_bitsegs(Bits)];
+comp_lit_bitsegs(<<>>) -> [];                       %Even bytes
+comp_lit_bitsegs(Bits) ->                           %Size < 8
+    N = bit_size(Bits),
+    <<B:N>> = Bits,
+    [c_byte_bitseg(B, N)].
+
+c_byte_bitseg(B, Sz) ->
+    c_bitstr(c_lit(B), c_int(Sz), c_int(1), c_atom(integer),
+             c_lit([unsigned,big])).
+
+-ifdef(HAS_MAPS).
+comp_lit_map(Map) ->
+    Pairs = comp_lit_mappairs(maps:to_list(Map)),
+    ann_c_map([], c_lit(#{}), Pairs).
+
+comp_lit_mappairs([{K,V}|Ps]) ->
+    [ann_c_map_pair([], c_lit(assoc), comp_lit(K), comp_lit(V))|
+     comp_lit_mappairs(Ps)];
+comp_lit_mappairs([]) -> [].
+-else.
+comp_lit_map(_) -> c_lit(map).
+-endif.
+
 %% pattern(Pattern, Line, Status) -> {CorePat,PatVars,State}.
 %%  Compile a pattern into a Core term. Handle quoted sexprs here
 %%  especially for symbols which then become variables instead of
@@ -997,7 +1050,7 @@ comp_gif(Te, Tr, Fa, Env, L, St0) ->
 
 pattern(Pat, L, St) -> pattern(Pat, L, [], St).
 
-pattern([quote,E], _, Vs, St) -> {comp_lit(E),Vs,St};
+pattern([quote,E], _, Vs, St) -> {pat_lit(E),Vs,St};
 pattern(['=',P1,P2], L, Vs0, St0) ->
     %% Core can only alias against a variable so there is wotk to do!
     {Cp1,Vs1,St1} = pattern(P1, L, Vs0, St0),
@@ -1020,6 +1073,10 @@ pattern([binary|Segs], L, Vs, St) ->
     pat_binary(Segs, L, Vs, St);
 pattern([map|As], L, Vs, St) ->
     pat_map(As, L, Vs, St);
+%% This allows us to use ++ macro in patterns.
+%% pattern([call,[quote,erlang],[quote,'++'],A1,A2], L, Vs, St) ->
+%%     Pat = foldr(fun (H, T) -> [cons,H,T] end, A2, A1),
+%%     pattern(Pat, L, Vs, St);
 %% Compile old no contructor list forms.
 pattern([H|T], L, Vs0, St0) ->
     {Ch,Vs1,St1} = pattern(H, L, Vs0, St0),
@@ -1028,9 +1085,9 @@ pattern([H|T], L, Vs0, St0) ->
 pattern([], _, Vs, St) -> {c_nil(),Vs,St};
 %% Literals.
 pattern(Bin, _, Vs, St) when is_bitstring(Bin) ->
-    {comp_lit(Bin),Vs,St};
+    {pat_lit(Bin),Vs,St};
 pattern(Tup, _, Vs, St) when is_tuple(Tup) ->
-    {comp_lit(Tup),Vs,St};
+    {pat_lit(Tup),Vs,St};
 pattern(Symb, L, Vs, St) when is_atom(Symb) ->
     pat_symb(Symb, L, Vs, St);                  %Variable
 pattern(Numb, _, Vs, St) when is_number(Numb) -> {c_lit(Numb),Vs,St}.
@@ -1153,7 +1210,9 @@ pat_bitseg({Pat,Sz,{Ty,Un,Si,En}}, L, Vs0, St0) ->
 
 pat_map(Args, L, Vs0, St0) ->
     {Pairs,Vs1,St1} = pat_map_pairs(Args, L, Vs0, St0),
-    {ann_c_map([L], c_lit(#{}), Pairs),Vs1,St1}.
+    %% Build #c_map{} then fill it in.
+    Map = ann_c_map_pattern([L], Pairs),        %Must us this for a pattern
+    {Map,Vs1,St1}.
 
 pat_map_pairs([K,V|As], L, Vs0, St0) ->
     Ck = pat_map_key(K),
@@ -1163,67 +1222,64 @@ pat_map_pairs([K,V|As], L, Vs0, St0) ->
      Vs2,St2};
 pat_map_pairs([], _, Vs, St) -> {[],Vs,St}.
 
-pat_map_key([quote,L]) -> comp_lit(L);
-pat_map_key(L) -> comp_lit(L).
+pat_map_key([quote,L]) -> pat_lit(L);
+pat_map_key(L) -> pat_lit(L).
 -else.
 pat_map(_, _, Vs, St) -> {c_lit(map),Vs,St}.
 -endif.
 
-line_file_anno(L, St) ->
-    [L,{file,St#cg.file}].
+%% pat_lit(Value) -> LitExpr.
+%%  Make a literal expression from an Erlang value. Make it as literal
+%%  as is required for a pattern. This function will fail if the value
+%%  is not expressable as a literal (for instance, a pid).
 
-%% comp_lit(Value) -> LitExpr.
-%%  Make a literal expression from an Erlang value. Try to make it as
-%%  literal as possible. This function will fail if the value is not
-%%  expressable as a literal (for instance, a pid).
-
-comp_lit([H|T]) ->
-    Ch = comp_lit(H),
-    Ct = comp_lit(T),
+pat_lit([H|T]) ->
+    Ch = pat_lit(H),
+    Ct = pat_lit(T),
     %% c_cons is smart and can handle head and tail both literals.
     c_cons(Ch, Ct);
-comp_lit([]) -> c_nil();
-comp_lit(T) when is_tuple(T) ->
-    Es = comp_lit_list(tuple_to_list(T)),
+pat_lit([]) -> c_nil();
+pat_lit(T) when is_tuple(T) ->
+    Es = pat_lit_list(tuple_to_list(T)),
     %% c_tuple is smart and can handle a list of literals.
     c_tuple(Es);
-comp_lit(A) when is_atom(A) -> c_atom(A);
-comp_lit(I) when is_integer(I) -> c_int(I);
-comp_lit(F) when is_float(F) -> c_float(F);
-comp_lit(Bin) when is_bitstring(Bin) ->
-    Bits = comp_lit_bitsegs(Bin),
+pat_lit(A) when is_atom(A) -> c_atom(A);
+pat_lit(I) when is_integer(I) -> c_int(I);
+pat_lit(F) when is_float(F) -> c_float(F);
+pat_lit(Bin) when is_bitstring(Bin) ->
+    Bits = pat_lit_bitsegs(Bin),
     ann_c_binary([], Bits);
-comp_lit(Map) when ?IS_MAP(Map) ->
-    comp_lit_map(Map).
+pat_lit(Map) when ?IS_MAP(Map) ->
+    pat_lit_map(Map).
 
-comp_lit_list(Vals) -> [ comp_lit(V) || V <- Vals ].
+pat_lit_list(Vals) -> [ pat_lit(V) || V <- Vals ].
 
-is_lit_list(Es) -> all(fun (E) -> is_literal(E) end, Es).
-
-comp_lit_bitsegs(<<B:8,Bits/bitstring>>) ->         %Next byte
-    [c_byte_bitseg(B, 8)|comp_lit_bitsegs(Bits)];
-comp_lit_bitsegs(<<>>) -> [];                       %Even bytes
-comp_lit_bitsegs(Bits) ->                           %Size < 8
+pat_lit_bitsegs(<<B:8,Bits/bitstring>>) ->         %Next byte
+    [c_byte_bitseg(B, 8)|pat_lit_bitsegs(Bits)];
+pat_lit_bitsegs(<<>>) -> [];                       %Even bytes
+pat_lit_bitsegs(Bits) ->                           %Size < 8
     N = bit_size(Bits),
     <<B:N>> = Bits,
     [c_byte_bitseg(B, N)].
 
-c_byte_bitseg(B, Sz) ->
-    c_bitstr(c_lit(B), c_int(Sz), c_int(1), c_atom(integer),
-             c_lit([unsigned,big])).
-
 -ifdef(HAS_MAPS).
-comp_lit_map(Map) ->
-    Pairs = comp_lit_mappairs(maps:to_list(Map)),
+pat_lit_map(Map) ->
+    Pairs = pat_lit_mappairs(maps:to_list(Map)),
     ann_c_map([], c_lit(#{}), Pairs).
 
-comp_lit_mappairs([{K,V}|Ps]) ->
-    [ann_c_map_pair([], c_lit(assoc), comp_lit(K), comp_lit(V))|
-     comp_lit_mappairs(Ps)];
-comp_lit_mappairs([]) -> [].
+pat_lit_mappairs([{K,V}|Ps]) ->
+    [ann_c_map_pair([], c_lit(assoc), pat_lit(K), pat_lit(V))|
+     pat_lit_mappairs(Ps)];
+pat_lit_mappairs([]) -> [].
 -else.
-comp_lit_map(_) -> c_lit(map).
+pat_lit_map(_) -> c_lit(map).
 -endif.
+
+%% line_file_anno(Line, State) -> Anno.
+%%  Make annotation witj line number and file.
+
+line_file_anno(L, St) ->
+    [L,{file,St#cg.file}].
 
 %% new_symb(State) -> {Symbol,State}.
 %% Create a hopefully new unused symbol.
@@ -1366,6 +1422,8 @@ c_lit(Val) -> cerl:abstract(Val).
 is_literal(Node) -> cerl:is_literal(Node).
 lit_val(Lit) -> cerl:concrete(Lit).
 
+data_es(Data) -> cerl:data_es(Data).
+
 c_cons(Hd, Tl) -> cerl:c_cons(Hd, Tl).
 c_cons_skel(Hd, Tl) -> cerl:c_cons_skel(Hd, Tl).
 cons_hd(Cons) -> cerl:cons_hd(Cons).
@@ -1393,10 +1451,27 @@ bitstr_unit(Bit) -> cerl:bitstr_unit(Bit).
 bitstr_type(Bit) -> cerl:bitstr_type(Bit).
 bitstr_flags(Bit) -> cerl:bitstr_flags(Bit).
 
+-ifdef(HAS_MAPS).
 ann_c_map(Ann, Arg, Ps) ->
     cerl:ann_c_map(Ann, Arg, Ps).
 
+%% ann_c_map_pattern(Ann, Pairs) -> Map
+%%  This function will come first in 18. Until then this is a little
+%%  tricky as ann_c_map will create a literal if the map pattern is a
+%%  literal and this is NOT what the compiler wants.
+
+ann_c_map_pattern(Ann, Ps) ->
+    case erlang:function_exported(cerl, ann_c_map_pattern, 2) of
+        true ->
+            cerl:ann_c_map_pattern(Ann, Ps);
+        false ->
+            Map0 = ann_c_map(Ann, dummy, Ps),
+            update_c_map(Map0, c_lit(#{}), Ps)
+    end.
+
+update_c_map(Map, Arg, Ps) ->
+    cerl:update_c_map(Map, Arg, Ps).
+
 ann_c_map_pair(Ann, Op, Key, Val) ->
     cerl:ann_c_map_pair(Ann, Op, Key, Val).
-
-data_es(Data) -> cerl:data_es(Data).
+-endif.

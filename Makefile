@@ -58,7 +58,7 @@ $(EBINDIR)/%.beam: $(SRCDIR)/%.erl
 	$(ERLC) -o $(SRCDIR) $<
 
 $(EBINDIR)/%.beam: $(SRCDIR)/%.lfe
-	$(LFEC) -I $(INCDIR) -o $(EBINDIR) $<
+	$(LFEC) -I $(INCDIR) -o $(EBINDIR) -pa ../lfe $<
 
 all: compile docs
 
@@ -67,9 +67,9 @@ all: compile docs
 ## Compile using rebar if it exists else using make
 compile: maps_opts.mk
 	if which rebar.cmd > /dev/null; \
-	then rebar.cmd compile; \
+	then ERL_LIBS=$(ERL_LIBS):../lfe rebar.cmd compile; \
 	elif which rebar > /dev/null; \
-	then rebar compile; \
+	then ERL_LIBS=$(ERL_LIBS):../lfe rebar compile; \
 	else \
 	$(MAKE) $(MFLAGS) erlc-lfec; \
 	fi
